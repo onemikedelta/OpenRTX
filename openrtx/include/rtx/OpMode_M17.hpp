@@ -121,6 +121,14 @@ private:
      */
     bool compareCallsigns(const std::string& localCs, const std::string& incomingCs);
 
+    /**
+     * Resolve the encryption mode to use for a transmission: the variable-key
+     * reply length while its window is open, otherwise the configured mode.
+     *
+     * @return one of enum cryptoMode.
+     */
+    uint8_t effectiveTxMode();
+
     // GPS update interval in superframes. Each superframe is 6 LICH frames
     // (~240 ms), so 25 superframes ≈ 6 seconds.
     static constexpr uint16_t GPS_UPDATE_TICKS = 25;
@@ -140,6 +148,17 @@ private:
     M17::FrameEncoder encoder;      ///< M17 frame encoder
     uint16_t gpsTimer;                 ///< GPS data transmission interval timer
     M17::MetaText metaText;            ///< M17 metatext accumulator
+
+    // AES stream encryption state (see core/crypto.h)
+    bool     txEncrypt;                ///< Current TX stream is encrypted
+    uint16_t txFrameNum;               ///< Mirror of the encoder stream FN
+    uint8_t  txNonce[14];              ///< LSF META nonce of the TX stream
+    bool     rxEncrypt;                ///< Current RX stream is being decrypted
+    uint8_t  rxNonce[14];              ///< LSF META nonce of the RX stream
+    uint8_t  varKeyMode;               ///< Pending adaptive reply mode (0=none)
+    long long varKeyExpiry;            ///< Tick after which varKeyMode lapses
+    bool     clearWarned;              ///< Clear-TX warning already given this key-up
+    bool     noKeyWarned;              ///< No-key warning already given this key-up
 };
 
 #endif /* OPMODE_M17_H */

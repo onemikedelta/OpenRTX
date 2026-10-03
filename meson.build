@@ -35,6 +35,7 @@ openrtx_def += {'FONT_UBUNTU_REGULAR': ''}
 
 openrtx_src = ['openrtx/src/core/state.c',
                'openrtx/src/core/threads.c',
+               'openrtx/src/core/crypto.c',
                'openrtx/src/core/battery.c',
                'openrtx/src/core/graphics.c',
                'openrtx/src/core/input.c',
@@ -101,6 +102,10 @@ endif
 # minmea, a lightweight GPS NMEA 0183 parser library
 openrtx_src += ['lib/minmea/minmea.c']
 openrtx_inc += ['lib/minmea/include']
+
+# AES block cipher + SHA-256 (public domain, vendored from B-Con/crypto-algorithms)
+openrtx_src += ['lib/crypto/aes.c', 'lib/crypto/sha256.c']
+openrtx_inc += ['lib/crypto']
 
 # QRCode, QR Code generation library
 openrtx_src += ['lib/QRCode/qrcode.c']

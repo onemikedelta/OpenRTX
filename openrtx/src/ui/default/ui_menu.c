@@ -17,6 +17,7 @@
 #include "core/memory_profiling.h"
 #include "ui/ui_strings.h"
 #include "core/voicePromptUtils.h"
+#include "core/crypto.h"
 
 #ifdef PLATFORM_TTWRPLUS
 #include "drivers/baseband/SA8x8.h"
@@ -1043,6 +1044,101 @@ void _ui_drawSettingsM17(ui_state_t* ui_state)
                               _ui_getM17ValueName);
     }
 }
+
+int _ui_getCryptoEntryName(char *buf, uint8_t max_len, uint8_t index)
+{
+    if(index >= settings_crypto_num) return -1;
+    sniprintf(buf, max_len, "%s", settings_crypto_items[index]);
+    return 0;
+}
+
+int _ui_getCryptoValueName(char *buf, uint8_t max_len, uint8_t index)
+{
+    if(index >= settings_crypto_num) return -1;
+
+    static const char *const modeNames[]  = { "Off", "128", "192", "256" };
+    static const char *const adaptNames[] = { "Off", "Up", "Match" };
+
+    switch(index)
+    {
+        case CR_MODE:
+            sniprintf(buf, max_len, "%s", modeNames[crypto_getMode() & 0x03]);
+            break;
+        case CR_KEY1:
+        case CR_KEY2:
+        case CR_KEY3:
+        {
+            uint8_t slot = index - CR_KEY1 + 1;
+            if(crypto_keyPresent(slot))
+            {
+                uint8_t fp[CRYPTO_FINGERPRINT_LEN];
+                crypto_fingerprint(slot, fp);
+                sniprintf(buf, max_len, "#%02X%02X%02X", fp[0], fp[1], fp[2]);
+            }
+            else
+            {
+                sniprintf(buf, max_len, "none");
+            }
+            break;
+        }
+        case CR_ADAPT:
+            sniprintf(buf, max_len, "%s", adaptNames[crypto_getAdaptiveMode() % 3]);
+            break;
+        case CR_ADAPT_TIME:
+            sniprintf(buf, max_len, "%us", crypto_getAdaptiveSecs());
+            break;
+        case CR_HEAR_CLEAR:
+            sniprintf(buf, max_len, "%s", crypto_getHearClear() ?
+                      currentLanguage->on : currentLanguage->off);
+            break;
+        case CR_HEAR_ENC:
+            sniprintf(buf, max_len, "%s", crypto_getHearEncrypted() ?
+                      currentLanguage->on : currentLanguage->off);
+            break;
+        case CR_CLEAR_WARN:
+            sniprintf(buf, max_len, "%s", crypto_getClearTxWarn() ?
+                      currentLanguage->on : currentLanguage->off);
+            break;
+    }
+    return 0;
+}
+
+void _ui_drawSettingsCrypto(ui_state_t* ui_state)
+{
+    gfx_clearScreen();
+    gfx_print(layout.top_pos, layout.top_font, TEXT_ALIGN_CENTER,
+              color_white, "Encryption");
+    _ui_drawMenuListValue(ui_state, ui_state->menu_selected,
+                          _ui_getCryptoEntryName, _ui_getCryptoValueName);
+}
+
+void _ui_drawSettingsCryptoKey(ui_state_t* ui_state)
+{
+    gfx_clearScreen();
+
+    char title[20];
+    sniprintf(title, sizeof(title), "Key %u (AES-%d)", ui_state->key_edit_slot,
+              crypto_keyBits(ui_state->key_edit_slot));
+    gfx_print(layout.top_pos, layout.top_font, TEXT_ALIGN_CENTER,
+              color_white, title);
+
+    // Wrap the hex digits across the whole content area so every character of
+    // a full 64-character AES-256 key stays on screen.
+    uint8_t  font_h   = gfx_getFontHeight(layout.menu_font);
+    int16_t  clip_top = layout.top_h + 1;
+    int16_t  clip_bot = CONFIG_SCREEN_HEIGHT - layout.bottom_h - 1;
+    point_t  text_pos = { layout.horizontal_pad, (int16_t)(clip_top + font_h) };
+    gfx_printBufferClipped(text_pos, layout.menu_font, TEXT_ALIGN_LEFT,
+                           color_white, ui_state->new_key,
+                           CONFIG_SCREEN_WIDTH - layout.horizontal_pad,
+                           clip_top, clip_bot);
+
+    char foot[24];
+    sniprintf(foot, sizeof(foot), "%u/%u  *A #B grn C", (unsigned)strlen(ui_state->new_key),
+              ui_state->key_edit_hexlen);
+    gfx_print(layout.bottom_pos, layout.bottom_font, TEXT_ALIGN_CENTER,
+              color_white, foot);
+}
 #endif
 
 void _ui_drawSettingsFM(ui_state_t* ui_state)
@@ -1266,9 +1362,9 @@ bool _ui_drawMacroMenu(ui_state_t* ui_state)
 #ifdef CONFIG_M17
     else if (last_state.channel.mode == OPMODE_M17)
     {
+        static const char *const cm[] = { "Clr", "K1", "K2", "K3" };
         gfx_print(pos_2, layout.top_font, TEXT_ALIGN_LEFT,
-                  color_white, "       ");
-
+                  color_white, "  %s", cm[crypto_getMode() & 0x03]);
     }
 #endif
 

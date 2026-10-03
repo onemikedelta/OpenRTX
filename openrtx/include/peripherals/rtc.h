@@ -10,6 +10,10 @@
 #include "core/datetime.h"
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Standard interface for real time clock drivers, providing both calendar and
  * clock functionalities.
@@ -71,5 +75,9 @@ void rtc_dstSet();
  * which firstly dectivates DST have no effect.
  */
 void rtc_dstClear();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* RTC_H */

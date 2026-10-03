@@ -49,6 +49,8 @@ enum uiScreen
     SETTINGS_GPS,
     SETTINGS_RADIO,
     SETTINGS_M17,
+    SETTINGS_CRYPTO,
+    SETTINGS_CRYPTO_KEY,
     SETTINGS_FM,
     SETTINGS_ACCESSIBILITY,
     SETTINGS_RESET2DEFAULTS,
@@ -88,6 +90,7 @@ enum settingsItems
     S_RADIO,
 #ifdef CONFIG_M17
     S_M17,
+    S_CRYPTO,
 #endif
     S_FM,
     S_ACCESSIBILITY,
@@ -143,6 +146,19 @@ enum settingsM17Items
     M17_METATEXT,
     M17_CAN,
     M17_CAN_RX
+};
+
+enum settingsCryptoItems
+{
+    CR_MODE = 0,
+    CR_KEY1,
+    CR_KEY2,
+    CR_KEY3,
+    CR_ADAPT,
+    CR_ADAPT_TIME,
+    CR_HEAR_CLEAR,
+    CR_HEAR_ENC,
+    CR_CLEAR_WARN
 };
 
 enum settingsFMItems
@@ -228,6 +244,11 @@ typedef struct ui_state_t
     char new_time_buf[9];
 #endif
     char new_callsign[10];
+    // AES key entry (SETTINGS_CRYPTO_KEY): hex string being typed, the slot
+    // (1/2/3) being edited and how many hex chars that key needs.
+    char new_key[65];
+    uint8_t key_edit_slot;
+    uint8_t key_edit_hexlen;
     freq_t new_offset;
     // Which state to return to when we exit menu
     uint8_t last_main_state;
@@ -246,6 +267,7 @@ extern const char *display_items[];
 extern const char *settings_gps_items[];
 extern const char *settings_radio_items[];
 extern const char *settings_m17_items[];
+extern const char *settings_crypto_items[];
 extern const char *settings_fm_items[];
 extern const char * settings_accessibility_items[];
 extern const char *backup_restore_items[];
@@ -257,6 +279,7 @@ extern const uint8_t display_num;
 extern const uint8_t settings_gps_num;
 extern const uint8_t settings_radio_num;
 extern const uint8_t settings_m17_num;
+extern const uint8_t settings_crypto_num;
 extern const uint8_t settings_fm_num;
 extern const uint8_t settings_accessibility_num;
 extern const uint8_t backup_restore_num;

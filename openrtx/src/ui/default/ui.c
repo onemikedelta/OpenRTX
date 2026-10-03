@@ -62,6 +62,7 @@
 #include "core/battery.h"
 #include "core/input.h"
 #include "core/utils.h"
+#include "core/crypto.h"
 #include "hwconfig.h"
 #include "core/voicePromptUtils.h"
 #include "core/beeps.h"
@@ -98,6 +99,8 @@ extern void _ui_drawSettingsTimeDateSet(ui_state_t* ui_state);
 #endif
 extern void _ui_drawSettingsDisplay(ui_state_t* ui_state);
 extern void _ui_drawSettingsM17(ui_state_t* ui_state);
+extern void _ui_drawSettingsCrypto(ui_state_t* ui_state);
+extern void _ui_drawSettingsCryptoKey(ui_state_t* ui_state);
 extern void _ui_drawSettingsFM(ui_state_t* ui_state);
 extern void _ui_drawSettingsVoicePrompts(ui_state_t* ui_state);
 extern void _ui_drawSettingsReset2Defaults(ui_state_t* ui_state);
@@ -130,6 +133,7 @@ const char *settings_items[] =
     "Radio",
 #ifdef CONFIG_M17
     "M17",
+    "Encryption",
 #endif
     "FM",
     "Accessibility",
@@ -172,6 +176,19 @@ const char * settings_m17_items[] =
     "Meta Txt",
     "CAN",
     "CAN RX Check"
+};
+
+const char * settings_crypto_items[] =
+{
+    "Encryption",
+    "Key 1",
+    "Key 2",
+    "Key 3",
+    "Adaptive Key",
+    "Adaptive Time",
+    "Clear in Enc",
+    "Enc in Clear",
+    "Clear TX Warn"
 };
 
 const char* settings_fm_items[] =
@@ -263,6 +280,7 @@ const uint8_t settings_gps_num = sizeof(settings_gps_items)/sizeof(settings_gps_
 const uint8_t settings_radio_num = sizeof(settings_radio_items)/sizeof(settings_radio_items[0]);
 #ifdef CONFIG_M17
 const uint8_t settings_m17_num = sizeof(settings_m17_items)/sizeof(settings_m17_items[0]);
+const uint8_t settings_crypto_num = sizeof(settings_crypto_items)/sizeof(settings_crypto_items[0]);
 #endif
 const uint8_t settings_fm_num = sizeof(settings_fm_items) / sizeof(settings_fm_items[0]);
 const uint8_t settings_accessibility_num = sizeof(settings_accessibility_items)/sizeof(settings_accessibility_items[0]);
@@ -278,6 +296,9 @@ const color_t yellow_fab413 = {250, 180, 19, 255};
 layout_t layout;
 state_t last_state;
 bool macro_latched;
+// Transient on-screen notice (e.g. "Zeroized"); drawn by the main screen.
+long long ui_cryptoNoticeUntil = 0;
+char      ui_cryptoNotice[16] = {0};
 static ui_state_t ui_state;
 static bool macro_menu = false;
 static bool layout_ready = false;
@@ -776,6 +797,17 @@ static void _ui_changeTimer(int variation)
     state.settings.display_timer += variation;
 }
 
+#ifdef CONFIG_M17
+// Convert one hex character ('0'-'9','A'-'F', case-insensitive) to its nibble.
+static uint8_t _ui_hexCharToVal(char c)
+{
+    if((c >= '0') && (c <= '9')) return c - '0';
+    if((c >= 'A') && (c <= 'F')) return c - 'A' + 10;
+    if((c >= 'a') && (c <= 'f')) return c - 'a' + 10;
+    return 0;
+}
+#endif
+
 static void _ui_changeMacroLatch(bool newVal)
 {
     state.settings.macroMenuLatch = newVal ? 1 : 0;
@@ -990,6 +1022,13 @@ static void _ui_fsm_menuMacro(kbd_msg_t msg, bool *sync_rtx)
                 *sync_rtx = true;
                 vp_announceBandwidth(state.channel.bandwidth, queueFlags);
             }
+#ifdef CONFIG_M17
+            else if(state.channel.mode == OPMODE_M17)
+            {
+                // Quick clear/encrypted selection: cycle Off/128/192/256.
+                crypto_setMode((crypto_getMode() + 1) % 4);
+            }
+#endif
             break;
         case 5:
             // Cycle through radio modes
@@ -1429,6 +1468,36 @@ void ui_updateFSM(bool *sync_rtx)
         msg.value = event.payload;
         bool f1Handled = false;
         enum vpQueueFlags queueFlags = vp_getVoiceLevelQueueFlags();
+
+#ifdef CONFIG_M17
+        // Zeroize: MONI and '0' held together wipe all AES keys and drop back
+        // to clear. Not '*': on MD3x MONI and '*' share column LCD_D7, so an
+        // inactive row shorts the line and the two can never be read at once;
+        // '0' is on a different column and '0' is unused by the macro menu.
+        // Requiring both keys at once avoids accidental triggers. The event is
+        // consumed and the macro overlay (which MONI would otherwise raise)
+        // dismissed, so the on-screen confirmation is actually visible.
+        {
+            static bool zeroizeArmed = true;
+            bool combo = (msg.keys & KEY_MONI) && (msg.keys & KEY_0);
+            if(combo && zeroizeArmed)
+            {
+                crypto_zeroize();
+                crypto_setMode(CRYPTO_OFF);
+                strcpy(ui_cryptoNotice, "Zeroized");
+                ui_cryptoNoticeUntil = getTick() + 2500;
+                zeroizeArmed  = false;
+                macro_menu    = false;
+                macro_latched = false;
+                *sync_rtx     = true;
+                return;
+            }
+            else if(!combo)
+            {
+                zeroizeArmed = true;
+            }
+        }
+#endif
         // If we get out of standby, we ignore the kdb event
         // unless is the MONI key for the MACRO functions
         if (_ui_exitStandby(now) && !(msg.keys & KEY_MONI))
@@ -1969,6 +2038,9 @@ void ui_updateFSM(bool *sync_rtx)
                         case S_M17:
                             state.ui_screen = SETTINGS_M17;
                             break;
+                        case S_CRYPTO:
+                            state.ui_screen = SETTINGS_CRYPTO;
+                            break;
 #endif
                         case S_FM:
                             state.ui_screen = SETTINGS_FM;
@@ -2449,6 +2521,118 @@ void ui_updateFSM(bool *sync_rtx)
                     }
                 }
                 break;
+            case SETTINGS_CRYPTO:
+                if(ui_state.edit_mode)
+                {
+                    bool dirUp   = (msg.keys & (KEY_UP | KEY_RIGHT | KNOB_RIGHT)) != 0;
+                    bool dirDown = (msg.keys & (KEY_DOWN | KEY_LEFT | KNOB_LEFT)) != 0;
+                    bool toggle  = dirUp || dirDown;
+
+                    switch(ui_state.menu_selected)
+                    {
+                        case CR_MODE:
+                            if(dirUp)   crypto_setMode((crypto_getMode() + 1) % 4);
+                            if(dirDown) crypto_setMode((crypto_getMode() + 3) % 4);
+                            break;
+                        case CR_ADAPT:
+                            if(dirUp)   crypto_setAdaptiveMode((crypto_getAdaptiveMode() + 1) % 3);
+                            if(dirDown) crypto_setAdaptiveMode((crypto_getAdaptiveMode() + 2) % 3);
+                            break;
+                        case CR_ADAPT_TIME:
+                            if(dirUp)   crypto_setAdaptiveSecs(crypto_getAdaptiveSecs() + 1);
+                            if(dirDown) crypto_setAdaptiveSecs(crypto_getAdaptiveSecs() - 1);
+                            break;
+                        case CR_HEAR_CLEAR:
+                            if(toggle) crypto_setHearClear(!crypto_getHearClear());
+                            break;
+                        case CR_HEAR_ENC:
+                            if(toggle) crypto_setHearEncrypted(!crypto_getHearEncrypted());
+                            break;
+                        case CR_CLEAR_WARN:
+                            if(toggle) crypto_setClearTxWarn(!crypto_getClearTxWarn());
+                            break;
+                    }
+
+                    if(msg.keys & (KEY_ENTER | KEY_ESC))
+                        ui_state.edit_mode = false;
+                }
+                else
+                {
+                    if(msg.keys & KEY_ENTER)
+                    {
+                        if((ui_state.menu_selected >= CR_KEY1) &&
+                           (ui_state.menu_selected <= CR_KEY3))
+                        {
+                            uint8_t slot = ui_state.menu_selected - CR_KEY1 + 1;
+                            ui_state.key_edit_slot   = slot;
+                            ui_state.key_edit_hexlen = crypto_keyBits(slot) / 4;
+                            ui_state.new_key[0]      = '\0';
+                            state.ui_screen = SETTINGS_CRYPTO_KEY;
+                        }
+                        else
+                        {
+                            ui_state.edit_mode = true;
+                        }
+                    }
+                    else if(msg.keys & (KEY_UP | KNOB_LEFT))
+                        _ui_menuUp(settings_crypto_num);
+                    else if(msg.keys & (KEY_DOWN | KNOB_RIGHT))
+                        _ui_menuDown(settings_crypto_num);
+                    else if(msg.keys & KEY_ESC)
+                        _ui_menuBack(MENU_SETTINGS);
+                }
+                break;
+            case SETTINGS_CRYPTO_KEY:
+            {
+                size_t klen = strlen(ui_state.new_key);
+
+                if(msg.long_press && (msg.keys & KEY_ENTER))
+                {
+                    // Save. The press that began this hold appended a 'C';
+                    // drop it. A non-empty buffer stores the key (zero-padded);
+                    // an empty buffer clears just this slot (single-key delete).
+                    if(klen > 0) ui_state.new_key[--klen] = '\0';
+
+                    uint8_t slot   = ui_state.key_edit_slot;
+                    uint8_t keylen = crypto_keyBits(slot) / 8;
+                    uint8_t key[32] = { 0 };
+                    for(uint8_t i = 0; (i < keylen) && (klen > 0); i++)
+                    {
+                        char hiC = (i * 2     < klen) ? ui_state.new_key[i*2]     : '0';
+                        char loC = (i * 2 + 1 < klen) ? ui_state.new_key[i*2 + 1] : '0';
+                        key[i] = (_ui_hexCharToVal(hiC) << 4) | _ui_hexCharToVal(loC);
+                    }
+                    crypto_setKey(slot, key, keylen);   // zeros when buffer empty
+                    state.ui_screen = SETTINGS_CRYPTO;
+                }
+                else if(msg.long_press && (msg.keys & KEY_ESC))
+                {
+                    state.ui_screen = SETTINGS_CRYPTO;   // cancel, no save
+                }
+                else if(msg.keys & KEY_LEFT)
+                {
+                    if(klen > 0) ui_state.new_key[klen - 1] = '\0';   // backspace
+                }
+                else
+                {
+                    char c = 0;
+                    if(input_isNumberPressed(msg))
+                        c = '0' + input_getPressedNumber(msg);
+                    else if(msg.keys & KEY_STAR)  c = 'A';
+                    else if(msg.keys & KEY_HASH)  c = 'B';
+                    else if(msg.keys & KEY_ENTER) c = 'C';
+                    else if(msg.keys & KEY_UP)    c = 'D';
+                    else if(msg.keys & KEY_DOWN)  c = 'E';
+                    else if(msg.keys & KEY_ESC)   c = 'F';
+
+                    if((c != 0) && (klen < ui_state.key_edit_hexlen))
+                    {
+                        ui_state.new_key[klen]     = c;
+                        ui_state.new_key[klen + 1] = '\0';
+                    }
+                }
+                break;
+            }
 #endif
             case SETTINGS_FM:
                 if (ui_state.edit_mode)
@@ -2733,6 +2917,12 @@ bool ui_updateGUI()
         // M17 settings screen
         case SETTINGS_M17:
             _ui_drawSettingsM17(&ui_state);
+            break;
+        case SETTINGS_CRYPTO:
+            _ui_drawSettingsCrypto(&ui_state);
+            break;
+        case SETTINGS_CRYPTO_KEY:
+            _ui_drawSettingsCryptoKey(&ui_state);
             break;
 #endif
         // FM settings screen

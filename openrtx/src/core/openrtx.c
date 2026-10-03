@@ -15,6 +15,7 @@
 #include "core/threads.h"
 #include "core/state.h"
 #include "core/ui.h"
+#include "core/crypto.h"
 #ifdef PLATFORM_LINUX
 #include <stdlib.h>
 #endif
@@ -27,6 +28,7 @@ void openrtx_init()
 
     platform_init();    // Initialize low-level platform drivers
     state_init();       // Initialize radio state
+    crypto_init();      // Bring up the battery-backed encryption config
 
     gfx_init();         // Initialize display and graphics driver
     kbd_init();         // Initialize keyboard driver

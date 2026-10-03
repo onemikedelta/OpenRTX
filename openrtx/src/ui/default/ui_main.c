@@ -14,6 +14,7 @@
 #include "ui/ui_strings.h"
 #include "core/utils.h"
 #include "ui/utils.h"
+#include "core/crypto.h"
 
 void _ui_drawMainBackground()
 {
@@ -22,6 +23,30 @@ void _ui_drawMainBackground()
     // Print bottom bar line of 1 pixel height
     gfx_drawHLine(CONFIG_SCREEN_HEIGHT - layout.bottom_h - 1, layout.hline_h, color_grey);
 }
+
+#ifdef CONFIG_M17
+// 16x9 key glyph, one bit per pixel, MSB = leftmost column. There is no key
+// symbol in the font, so it is blitted directly.
+static const uint16_t key_icon_rows[9] = {
+    0x1C00, 0x3E00, 0x7700, 0xE3FE, 0xC1FF, 0xE3FE, 0x7714, 0x3E14, 0x1C00
+};
+
+// Blit the key glyph with its right edge at x = rx, vertically centred on cy.
+static void _ui_drawKeyIcon(int16_t rx, int16_t cy, color_t col)
+{
+    int16_t x0 = (int16_t)(rx - 15);
+    int16_t y0 = (int16_t)(cy - 4);
+    for(int16_t r = 0; r < 9; r++)
+    {
+        uint16_t bits = key_icon_rows[r];
+        for(int16_t c = 0; c < 16; c++)
+        {
+            if(bits & (uint16_t)(0x8000u >> c))
+                gfx_setPixel((point_t){ (int16_t)(x0 + c), (int16_t)(y0 + r) }, col);
+        }
+    }
+}
+#endif
 
 void _ui_drawMainTop(ui_state_t * ui_state)
 {
@@ -55,6 +80,24 @@ void _ui_drawMainTop(ui_state_t * ui_state)
     if (ui_state->input_locked == true)
       gfx_drawSymbol(layout.top_pos, layout.top_symbol_size, TEXT_ALIGN_LEFT,
                      color_white, SYMBOL_LOCK);
+
+#ifdef CONFIG_M17
+    // Encryption indicator between the clock and the battery: a small key,
+    // green when the selected mode has a loaded key, red when it has none
+    // (so a "No Key" state never shows a reassuring green icon). Only while in
+    // M17: encryption does not apply to FM/analog, so no key shows there.
+    uint8_t cmode = crypto_getMode();
+    if((cmode != CRYPTO_OFF) && (last_state.channel.mode == OPMODE_M17))
+    {
+        const color_t green = {0, 255, 0, 255};
+        const color_t red   = {255, 0, 0, 255};
+        uint16_t bat_width = CONFIG_SCREEN_WIDTH / 9;
+        int16_t  rx = (int16_t)(CONFIG_SCREEN_WIDTH - bat_width
+                      - (layout.horizontal_pad * 2) - 2);
+        int16_t  cy = (int16_t)(layout.top_h / 2);
+        _ui_drawKeyIcon(rx, cy, crypto_keyPresent(cmode) ? green : red);
+    }
+#endif
 }
 
 void _ui_drawBankChannel()
@@ -131,6 +174,29 @@ void _ui_drawModeInfo(ui_state_t* ui_state)
         {
             // Print M17 Destination ID on line 3 of 3
             rtxStatus_t rtxStatus = rtx_getCurrentStatus();
+
+            // Right of line 1: green "Key N" during an encrypted stream, red
+            // "No Key" when a crypto mode is armed with an empty key slot (TX
+            // is blocked), or red "CLEAR" when transmitting unencrypted with
+            // the clear-TX warning on. Nothing otherwise, so the clear layout
+            // is unchanged.
+            {
+                const color_t green = {0, 255, 0, 255};
+                const color_t red   = {255, 0, 0, 255};
+                uint8_t cmode  = crypto_getMode();
+                bool clearTx = (cmode == CRYPTO_OFF) && crypto_getClearTxWarn()
+                               && platform_getPttStatus();
+
+                if(rtxStatus.cryptoKey != 0)
+                    gfx_print(layout.line1_pos, layout.line1_font, TEXT_ALIGN_RIGHT,
+                              green, "Key %u", rtxStatus.cryptoKey);
+                else if((cmode != CRYPTO_OFF) && !crypto_keyPresent(cmode))
+                    gfx_print(layout.line1_pos, layout.line1_font, TEXT_ALIGN_RIGHT,
+                              red, "No Key");
+                else if(clearTx)
+                    gfx_print(layout.line1_pos, layout.line1_font, TEXT_ALIGN_RIGHT,
+                              red, "CLEAR");
+            }
 
             if(rtxStatus.lsfOk)
             {
@@ -307,8 +373,16 @@ void _ui_drawVFOMiddleInput(ui_state_t* ui_state)
     }
 }
 
+// Transient on-screen notice (e.g. "Zeroized"), owned by ui.c.
+extern long long ui_cryptoNoticeUntil;
+extern char      ui_cryptoNotice[];
+
 void _ui_drawMainBottom()
 {
+    if(getTick() < ui_cryptoNoticeUntil)
+        gfx_print(layout.line3_large_pos, layout.line3_large_font,
+                  TEXT_ALIGN_CENTER, yellow_fab413, ui_cryptoNotice);
+
     // Squelch bar
     rssi_t   rssi = last_state.rssi;
     uint8_t  squelch = last_state.settings.sqlLevel;
