@@ -38,6 +38,7 @@
 #define AIN_MIC    GPIOA,3
 #define AIN_RSSI   GPIOB,0
 #define AIN_RTX    GPIOC,3
+#define AIN_CTCSS  GPIOA,2   /* Filtered sub-audio for CTCSS/DCS decode */
 
 /* Channel selection rotary encoder */
 #define CH_SELECTOR_0 GPIOE,14

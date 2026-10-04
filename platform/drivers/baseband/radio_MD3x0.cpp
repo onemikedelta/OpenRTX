@@ -14,6 +14,8 @@
 #include "hwconfig.h"
 #include <algorithm>
 #include "core/utils.h"
+#include "core/ctcssDetector.hpp"
+#include "drivers/audio/stm32_adc.h"
 #include "drivers/baseband/HR_C5000.h"
 #include "drivers/baseband/SKY72310.h"
 
@@ -30,6 +32,54 @@ static uint8_t txpwr_hi  = 0;                   // APC voltage for TX output pow
 static enum opstatus radioStatus;               // Current operating status
 
 static HR_C5000 C5000((const struct spiDevice *) &c5000_spi, { DMR_CS });
+
+/*
+ * Software CTCSS tone squelch. MD3x0 has no in-chip tone decoder: the radio
+ * routes the filtered sub-audio to PA2, which is sampled with ADC3 and fed to
+ * a Goertzel detector. The ADC DMA buffer must live in a DMA-reachable region,
+ * hence .bss2 (the 128kB RAM) rather than the default .bss (CCM, no DMA).
+ */
+static constexpr uint32_t CTCSS_SAMPLE_RATE = 2000;
+
+/*
+ * Double-buffered, so a block is half of this and new samples only become
+ * visible once per block. The size sets that interval: 256 samples at 2 kHz
+ * means a block every 64 ms, twice the ~32 ms period of OpMode_FM::update(),
+ * which is the slowest rate at which the detector is polled. Sizing it closer
+ * than that loses blocks and leaves gaps in the window, which breaks the phase
+ * continuity the Goertzel depends on and stops it opening at all.
+ */
+static int16_t __attribute__((section(".bss2"))) ctcssSamples[256];
+static streamCtx ctcssCtx;
+static int16_t *prevCtcssBuf;
+
+/*
+ * The 50 CTCSS tones are 2-4 Hz apart at the low end, so the Goertzel needs a
+ * 0.25 s window to resolve neighbouring bins. Holding those samples in a ring
+ * and re-evaluating on each ADC block, rather than integrating a fixed block
+ * and resetting, gives a decision per block without shortening the
+ * integration.
+ *
+ * Opening requires the configured tone to be the dominant bin and well above
+ * the 50-bin average; once open the decision is held until that tone's own
+ * energy falls below a lower threshold, so a weak but valid tone is not
+ * chopped.
+ */
+static constexpr uint32_t CTCSS_WINDOW      = CTCSS_SAMPLE_RATE / 4;  // 500
+static constexpr float    CTCSS_OPEN_RATIO  = 20.0f;  // tone/avg to open
+static constexpr float    CTCSS_CLOSE_RATIO = 10.0f;  // tone/avg to stay open
+static Goertzel<50> ctcssG(ctcssCoeffs2k);
+static int16_t  ctcssWin[CTCSS_WINDOW];
+static uint16_t ctcssWrite = 0;
+static uint16_t ctcssFill  = 0;           // never exceeds CTCSS_WINDOW
+static bool     ctcssOpen  = false;
+
+static void ctcssReset()
+{
+    ctcssWrite = 0;
+    ctcssFill  = 0;
+    ctcssOpen  = false;
+}
 
 /*
  * Parameters for RSSI voltage (mV) to input power (dBm) conversion.
@@ -98,6 +148,16 @@ void radio_init(const rtxStatus_t *rtxState)
     gpio_clearPin(RF_APC_SW);  // Disable TX power control
     gpio_clearPin(TX_STG_EN);  // Disable TX power stage
     gpio_clearPin(RX_STG_EN);  // Disable RX input stage
+
+    // ADC1 serves VOL/VBAT/VOX/RSSI and ADC2 the audio baseband, leaving ADC3
+    // free for the sub-audible tone input on PA2.
+    gpio_setMode(AIN_CTCSS, ANALOG);
+    ctcssCtx.buffer     = ctcssSamples;
+    ctcssCtx.bufSize    = ARRAY_SIZE(ctcssSamples);
+    ctcssCtx.bufMode    = BUF_CIRC_DOUBLE;
+    ctcssCtx.sampleRate = CTCSS_SAMPLE_RATE;
+    ctcssCtx.running    = 0;
+    stm32adc_init(STM32_ADC_ADC3);
 
     /*
      * Configure and enable DAC
@@ -181,7 +241,77 @@ void radio_setOpmode(const enum opmode mode)
 
 bool radio_checkRxDigitalSquelch()
 {
-    return false;
+    int16_t *data;
+    size_t   len;
+
+    // Sampling stream stopped: cannot detect the tone
+    if(ctcssCtx.running == 0)
+        return false;
+
+    // OpMode_FM::update() runs at 33 Hz and calls this twice per cycle, for the
+    // audio and the LED decision, while a DMA half-buffer completes every
+    // 32 ms. The decision cannot change without new samples, so return the
+    // standing one: re-analysing per call would repeat the 50-bin Goertzel over
+    // all CTCSS_WINDOW samples around 66 times a second.
+    len = stm32_adc_audio_driver.data(&ctcssCtx, &data);
+    if(data == prevCtcssBuf)
+        return ctcssOpen;
+
+    // Append the latest ADC block to the sliding window (oldest overwritten)
+    prevCtcssBuf = data;
+    for(size_t i = 0; i < len; i++)
+    {
+        ctcssWin[ctcssWrite] = data[i];
+        ctcssWrite = (ctcssWrite + 1) % CTCSS_WINDOW;
+        if(ctcssFill < CTCSS_WINDOW)
+            ctcssFill++;
+    }
+
+    // Hold the current decision until a full window of samples is available
+    if(ctcssFill < CTCSS_WINDOW)
+        return ctcssOpen;
+
+    // Re-evaluate every tone bin over the whole window, feeding it oldest
+    // sample first (the ring head is the oldest when the buffer is full).
+    ctcssG.reset();
+    ctcssG.samples(&ctcssWin[ctcssWrite], CTCSS_WINDOW - ctcssWrite);
+    ctcssG.samples(&ctcssWin[0], ctcssWrite);
+
+    float  avg  = 0.0f;
+    float  max  = 0.0f;
+    size_t peak = 0;
+    for(size_t i = 0; i < 50; i++)
+    {
+        float p = ctcssG.power(i);
+        avg += p;
+        if(p > max)
+        {
+            max  = p;
+            peak = i;
+        }
+    }
+    avg /= 50.0f;
+
+    uint8_t target      = ctcssFreqToIndex(config->rxTone);
+    float   targetRatio = (avg > 0.0f) ? (ctcssG.power(target) / avg) : 0.0f;
+
+    if(ctcssOpen == false)
+    {
+        // Acquire: the configured tone must be the dominant bin and clearly
+        // above the noise floor.
+        if((peak == target) && ((max / avg) >= CTCSS_OPEN_RATIO))
+            ctcssOpen = true;
+    }
+    else
+    {
+        // Hold: keep open while the configured tone itself is still present,
+        // using a lower threshold so a fading/weak tone is not chopped. A
+        // transient foreign peak elsewhere does not close us.
+        if(targetRatio < CTCSS_CLOSE_RATIO)
+            ctcssOpen = false;
+    }
+
+    return ctcssOpen;
 }
 
 void radio_enableAfOutput()
@@ -218,6 +348,14 @@ void radio_enableRx()
     DAC->DHR12L1 = vtune_rx * 0xFF;
 
     gpio_setPin(RX_STG_EN);            // Enable RX LNA
+
+    // Start CTCSS sampling for tone squelch, analog FM RX only
+    if((config->opMode == OPMODE_FM) && (config->rxToneEn == true))
+    {
+        ctcssReset();
+        stm32_adc_audio_driver.start(STM32_ADC_ADC3, (void *) ADC_CTCSS_CH, &ctcssCtx);
+    }
+
     radioStatus = RX;
 }
 
@@ -300,6 +438,13 @@ void radio_disableRtx()
     gpio_clearPin(TX_STG_EN);   // Disable TX PA
     gpio_clearPin(RX_STG_EN);   // Disable RX LNA
     gpio_clearPin(FM_MUTE);     // Mute analog path towards the audio amplifier
+
+    // Shut down CTCSS ADC sampling and reset the tone detector
+    if(ctcssCtx.running)
+    {
+        stm32_adc_audio_driver.terminate(&ctcssCtx);
+        ctcssReset();
+    }
 
     radioStatus = OFF;
 }
