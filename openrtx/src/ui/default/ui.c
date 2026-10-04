@@ -284,6 +284,9 @@ static bool layout_ready = false;
 static bool redraw_needed = true;
 
 static bool standby = false;
+
+/* Volume counts (of 255) a knob must move before it counts as user input. */
+static const uint8_t VOLUME_WAKE_DEADBAND = 4;
 static long long last_event_tick = 0;
 
 // UI event queue
@@ -2625,7 +2628,20 @@ void ui_updateFSM(bool *sync_rtx)
         }
 #endif //            CONFIG_GPS
 
-        if (txOngoing || rtx_rxSquelchOpen() || (state.volume != last_state.volume))
+        /*
+         * Wake on activity the user can actually hear, plus deliberate knob
+         * movement. The volume knob is an analog read quantised to 0-255, so
+         * one count is a few ADC LSBs and a position sitting on a quantisation
+         * boundary flaps continuously; comparing for inequality took that for
+         * user input and kept the backlight alive on noise alone. A real turn
+         * crosses several counts between UI frames.
+         */
+        int volDelta = (int) state.volume - (int) last_state.volume;
+
+        if (volDelta < 0)
+            volDelta = -volDelta;
+
+        if (txOngoing || rtx_rxSquelchOpen() || (volDelta > VOLUME_WAKE_DEADBAND))
         {
             _ui_exitStandby(now);
             return;
