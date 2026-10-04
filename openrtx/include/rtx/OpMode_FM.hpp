@@ -80,6 +80,7 @@ private:
     bool   rfSqlOpen;   ///< Flag for RF squelch status (analog squelch).
     bool   sqlOpen;     ///< Flag for squelch status.
     bool   enterRx;     ///< Flag for RX management.
+    long long toneBlinkTick; ///< Start of the current tone-squelch blink cycle.
     pathId rxAudioPath; ///< Audio path ID for RX
     pathId txAudioPath; ///< Audio path ID for TX
 };

@@ -37,7 +37,16 @@ void _setVolume()
 }
 #endif
 
-OpMode_FM::OpMode_FM() : rfSqlOpen(false), sqlOpen(false), enterRx(true)
+/*
+ * Blink cadence for an armed but closed tone squelch. The on-time is one
+ * update() period so the blink always lands on a cycle, and the duty cycle is
+ * low enough to be read as a standby indication rather than activity.
+ */
+static constexpr long long TONE_BLINK_PERIOD = 480;
+static constexpr long long TONE_BLINK_ON     = 30;
+
+OpMode_FM::OpMode_FM() : rfSqlOpen(false), sqlOpen(false), enterRx(true),
+                         toneBlinkTick(0)
 {
 }
 
@@ -141,20 +150,42 @@ void OpMode_FM::update(rtxStatus_t *const status, const bool newCfg)
     switch(status->opStatus)
     {
         case RX:
-            if(radio_checkRxDigitalSquelch())
+            platform_ledOff(RED);
+
+            if(rfSqlOpen)
             {
-                platform_ledOn(GREEN);  // Red + green LEDs ("orange"): tone squelch open
-                platform_ledOn(RED);
+                /*
+                 * Carrier present, tone matching or not. These radios share a
+                 * frequency between groups that each use their own tone, so the
+                 * lamp reports occupancy rather than whether the audio is open:
+                 * a user who cannot see the channel is busy transmits over it.
+                 */
+                platform_ledOn(GREEN);
             }
-            else if(rfSqlOpen)
+            else if(status->rxToneEn == 1)
             {
-                platform_ledOn(GREEN);  // Green LED only: RF squelch open
-                platform_ledOff(RED);
+                /*
+                 * Armed for a tone with no carrier at all. Blink briefly to
+                 * separate "listening for a tone" from a plain quiet channel,
+                 * at a duty cycle low enough to cost a fraction of the LED
+                 * current.
+                 *
+                 * Driven from a timestamp rather than a count of update()
+                 * calls, because this handler is only nominally periodic.
+                 */
+                long long now = getTick();
+
+                if((now - toneBlinkTick) >= TONE_BLINK_PERIOD)
+                    toneBlinkTick = now;
+
+                if((now - toneBlinkTick) < TONE_BLINK_ON)
+                    platform_ledOn(GREEN);
+                else
+                    platform_ledOff(GREEN);
             }
             else
             {
                 platform_ledOff(GREEN);
-                platform_ledOff(RED);
             }
 
             break;
